@@ -13,16 +13,78 @@
 
 ## 为什么需要它
 
-直接把 Cloudflare 的 `/ai/v1` 填进 sub2api 会有四个坑（均已用真实账户实测）：
+### 先说「免费」到底能做什么
+
+Cloudflare Workers AI 的 **Free 计划每天送 10,000 Neurons**（00:00 UTC 重置），不用信用卡、不按小时计费、不限流量带宽。本仓库收录的 10 个底层模型全部实测在 Free 上可用，把额度换算成实际工作量大约是：
+
+| 工作类型 | 单次实测消耗 | 每天 10,000 Neurons 能做多少 |
+| --- | --- | --- |
+| 短问答 / 分类 / 打标（约 150 output tokens） | 5.6 Neurons | **约 1,800 次** |
+| 一篇几百字的总结或改写（约 500 output tokens） | 约 18 Neurons | **约 550 篇** |
+| 写一段完整短文 / 邮件（约 2,200 output tokens） | 80 Neurons | **约 120 篇** |
+| 向量化一条短文本（`@cf/baai/bge-m3`） | 0.026 Neurons | **约 38 万条** |
+| 生成一张 512×512 图（4 steps） | 约 43 Neurons | **约 230 张** |
+
+也就是说：**一个人、一个小团队、一个副业项目，日常 AI 用量基本花不完免费额度**；就算真超了，Free 是「直接失败」而不是偷偷扣费，升级 Paid 后超出部分也只要 `$0.011 / 1,000 Neurons`。这套东西的价值不是「便宜」，而是**把一堆零散的 AI 小需求，用一个不需要运维、不会突然产生账单的端点全部接住**。
+
+### 具体能拿来做什么（都是真实可落地的例子）
+
+**1. 给现有软件塞一个「AI 按钮」，零改造**
+很多应用只认 OpenAI 格式（`base_url` + `api_key` + `model`）。把 `base_url` 指向本 Worker，就能直接用上免费模型，代码一行不改：
+
+- 博客 / 文档站的「AI 摘要」「相关文章推荐」「术语解释」
+- 后台管理系统的「把这段日志翻译成人话」「根据表格生成一段说明」
+- 客服工单系统里的「自动回复草稿」「情绪与优先级判定」
+- 笔记 / 知识库工具的「给当前页面生成 3 个复习问题」
+
+配 `granite-4-micro`（实测单次 0.07 Neurons）跑这类轻量任务，一天几千次也几乎不消耗额度。
+
+**2. 批量结构化处理（最划算的一类）**
+任务窄、输出短，正好卡在免费额度最甜的位置：
+
+- 把一堆商品评论 / 问卷 / 工单批量打上 `{"sentiment": "...", "category": "...", "priority": "..."}` 的 JSON
+- 从邮件、简历、发票文本里抽取固定字段
+- 给爬虫抓来的网页做标题归一化、去重、关键词提取
+- 每天定时把新增内容分类后写进表格或数据库
+
+用 `gpt-4o-mini`（`llama-3.3-70b`）或 `mistral-small-3.1` + 强制 `max_tokens`，每天能处理上千条，成本为零。
+
+**3. 个人 / 小团队助手**
+- Telegram / 飞书 / Slack 群机器人：群内问答、每日简报、链接摘要、待办提醒
+- 命令行小工具：`git diff | ai "写一句 commit message"`、README 生成、报错解释
+- CI 里的 PR 摘要与风险提示、单测草稿生成
+- 多语言翻译、润色、改写
+
+因为 Worker 隐藏了真实的 Cloudflare 令牌，这些脚本里只需要放一个自己生成的 `GATEWAY_KEY`。
+
+**4. RAG / 语义检索**
+Workers AI 的 embedding 模型极便宜（一条短文本 0.026 Neurons）。把文档、笔记、产品资料向量化后配合 Vectorize 做检索，问答时只把命中的片段交给生成模型：一次性索引几万条也几乎不花额度，日常问答又是短输出。适合做「私人知识库」「站内语义搜索」「客服 FAQ 匹配」。
+
+**5. 多模型试验台，不用管账号和计费**
+收录了 10 个不同定位的免费模型，可以一个 `model` 参数就横向对比效果：
+
+| 想干什么 | 用哪个别名 |
+| --- | --- |
+| 通用稳妥、要 `content` 直接有值 | `gpt-4o-mini` / `gpt-4o` |
+| 中文、推理、复杂一点的题 | `qwen3-30b` / `glm-4.7-flash` |
+| 代码、需要推理链 | `gpt-oss-120b` / `gpt-oss-20b` |
+| 长文本、质量优先 | `nemotron-3-120b` |
+| 高并发低成本、简单任务 | `granite-4-micro` / `llama-4-scout` |
+
+不用为每个模型单独注册账号、不用配多套 key，也不用担心试错产生费用。
+
+### 那为什么还需要这一层网关
+
+上面这些事，直接用 Cloudflare 的 `/ai/v1` 也能做 —— 但**塞进现成工具链时会踩四个坑**（均已用真实账户实测）：
 
 | 坑 | 实测结果 | 本 Worker 的解法 |
 | --- | --- | --- |
-| sub2api 默认转成 Responses API 转发 | Cloudflare `/ai/v1/responses` 用标准 `input` 字段返回 **400** | 只对外提供 `/v1/chat/completions`，并在 sub2api 强制 `force_chat_completions` |
-| Cloudflare 没有模型列表 | `GET /ai/v1/models` → **405**，POST → 400 | 补齐 `/v1/models` |
-| 模型名不兼容 | 下游发 `gpt-4o-mini`，Cloudflare 只认 `@cf/...` | 内置别名映射，也允许直接传 `@cf/...` |
+| sub2api / 各类客户端默认转成 Responses API 转发 | Cloudflare `/ai/v1/responses` 用标准 `input` 字段返回 **400** | 只对外提供 `/v1/chat/completions`，并在 sub2api 强制 `force_chat_completions` |
+| Cloudflare 没有模型列表 | `GET /ai/v1/models` → **405**，POST → 400 | 补齐 `/v1/models`，sub2api 能直接拉取 |
+| 模型名不兼容 | 下游发 `gpt-4o-mini`，Cloudflare 只认 `@cf/...` | 内置 12 个别名映射，也允许直接传 `@cf/...` |
 | reasoning 模型输出空白 | `glm-4.7-flash` / `gpt-oss-20b` 的输出在 `reasoning_content`，`content` 为 `null` | 非流式与 SSE 都把 `reasoning_content` / `reasoning` 归一到 `content` |
 
-另外：隐藏真实 Cloudflare token、发请求前做 host 安全校验（拒绝 `localhost` / 环回 / 私有 / 保留地址）、上游错误码原样透传。
+**一句话**：Cloudflare 提供的是「便宜好用的模型」，本 Worker 把它变成「任何 OpenAI-compatible 工具都能直接插上、且不会突然出账单的标准插座」。附带还有：隐藏真实 Cloudflare 令牌、限制 `max_tokens` 保护免费额度、发请求前做 host 安全校验（拒绝 `localhost` / 环回 / 私有 / 保留地址）、上游错误码原样透传。
 
 ---
 
