@@ -14,6 +14,9 @@
  *       源码、示例、测试中不包含任何可用凭据字面量。
  */
 
+import { record, resolveRange, summary } from "./metrics.js";
+import { DASHBOARD_HTML } from "./dashboard.js";
+
 const UPSTREAM_HOST = "api.cloudflare.com";
 
 // 别名 -> Workers AI 模型名。
@@ -162,6 +165,18 @@ function json(obj, status = 200) {
   });
 }
 
+/** 统一鉴权：主链路与工作台共用。返回 Response 表示失败，null 表示通过。 */
+function verifyGatewayKey(request, env) {
+  const expected = env.GATEWAY_KEY;
+  if (!expected) {
+    return json({ error: "gateway not configured: GATEWAY_KEY is missing" }, 500);
+  }
+  const auth = request.headers.get("Authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!timingSafeEqual(token, expected)) return json({ error: "unauthorized" }, 401);
+  return null;
+}
+
 /** 把 SSE 每行的 delta.reasoning_content / reasoning 折叠进 delta.content。 */
 export function rewriteSseLine(line) {
   const bare = line.endsWith("\r") ? line.slice(0, -1) : line;
@@ -216,12 +231,34 @@ function normalizeSseStream() {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    // ---- 监控工作台（整页与 API 都要鉴权）----
+    const isDashboard = path === "/dashboard" || path === "/dashboard/";
+    const isSummary = path === "/dashboard/api/summary";
+    if (isDashboard || isSummary) {
+      if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
+      const gate = verifyGatewayKey(request, env);
+      if (gate) return gate;
+      if (isDashboard) {
+        return new Response(DASHBOARD_HTML, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+            "X-Frame-Options": "DENY",
+          },
+        });
+      }
+      const range = resolveRange(url.searchParams);
+      const out = await summary(env, ctx, range);
+      return json(out);
     }
 
     // 健康检查：不触达上游
@@ -244,13 +281,8 @@ export default {
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
 
     // 自有网关 key：只来自 env
-    const expected = env.GATEWAY_KEY;
-    if (!expected) {
-      return json({ error: "gateway not configured: GATEWAY_KEY is missing" }, 500);
-    }
-    const auth = request.headers.get("Authorization") || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!timingSafeEqual(token, expected)) return json({ error: "unauthorized" }, 401);
+    const gate = verifyGatewayKey(request, env);
+    if (gate) return gate;
 
     // 上游凭据：只来自 env，绝不转发 GATEWAY_KEY
     const cfToken = env.CF_AI_TOKEN;
@@ -261,7 +293,11 @@ export default {
 
     // 占位值拦截：一键部署时若未替换示例值，这里直接给出可操作的报错，
     // 而不是让 Cloudflare 返回 "Could not route to /accounts/replace-with-..."。
-    const unresolved = Object.entries({ GATEWAY_KEY: expected, CF_AI_TOKEN: cfToken, CF_ACCOUNT_ID: accountId })
+    const unresolved = Object.entries({
+      GATEWAY_KEY: env.GATEWAY_KEY,
+      CF_AI_TOKEN: cfToken,
+      CF_ACCOUNT_ID: accountId,
+    })
       .filter(([, v]) => PLACEHOLDER_VALUES.has(String(v).trim()) || /^replace-with/i.test(String(v).trim()))
       .map(([k]) => k);
     if (unresolved.length) {
@@ -308,6 +344,25 @@ export default {
     );
 
     const isStream = body.stream === true;
+    const startedAt = Date.now();
+    const metricBase = {
+      alias: requested,
+      upstreamModel: model,
+      stream: isStream,
+    };
+
+    // 埋点辅助：状态类别 + 错误码摘要（不含响应正文）
+    const emit = (statusClass, errorTag, usage) => {
+      record(env, {
+        ...metricBase,
+        statusClass,
+        errorTag,
+        neurons: usage?.neurons ?? 0,
+        promptTokens: usage?.prompt_tokens ?? 0,
+        completionTokens: usage?.completion_tokens ?? 0,
+        latencyMs: Date.now() - startedAt,
+      });
+    };
 
     // host 是硬编码常量，不取自请求输入；发请求前仍完整校验一次
     let upstream;
@@ -329,13 +384,17 @@ export default {
         body: JSON.stringify(body),
       });
     } catch (e) {
+      emit("upstream_error", "network_error");
       return json({ error: "upstream request failed", detail: String(e.message || e) }, 502);
     }
 
     const contentType = res.headers.get("content-type") || "application/json";
 
-    // 流式：透传 SSE，并逐行归一 reasoning_content
+    // 流式：透传 SSE，并逐行归一 reasoning_content。
+    // SSE 里上游的 usage 在最后一个 chunk，Worker 不缓冲整条流，故此处只记请求数
+    // （Neurons 记 0），页面会注明「流式用量可能低估」。
     if (isStream && res.ok && res.body) {
+      emit("ok", "");
       return new Response(res.body.pipeThrough(normalizeSseStream()), {
         status: res.status,
         headers: {
@@ -354,8 +413,14 @@ export default {
     try {
       data = JSON.parse(text);
     } catch {
+      emit(res.ok ? "ok" : "upstream_error", "non_json_response");
       return new Response(text, { status: res.status, headers: { "Content-Type": contentType } });
     }
+    const usage = data?.usage || null;
+    const errorTag = res.ok
+      ? ""
+      : String(data?.errors?.[0]?.code ?? data?.error?.code ?? res.status).slice(0, 64);
+    emit(res.ok ? "ok" : "upstream_error", errorTag, usage);
     if (res.ok) {
       for (const ch of data?.choices || []) {
         const m = ch?.message || {};

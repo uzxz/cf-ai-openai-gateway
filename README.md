@@ -8,7 +8,7 @@
 - **零基础设施**：一个 Worker，不需要 KV / D1 / R2 / 服务器。
 - **凭据隔离**：Cloudflare API 令牌只存在 Worker Secret 里，不下发给下游客户端。
 - **额度保护**：默认把 `max_tokens` 钳制在 512，防止一次请求耗尽每日免费额度。
-- **监控工作台（规划中）**：用量 / 额度 / 模型分布 / 错误统计的自带看板，方案见 [docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)（当前仅为设计稿，尚未实现）。
+- **监控工作台**：用量 / 额度 / 模型分布 / 错误统计的自带看板，支持今天/周/月/年与自定义日期范围，见[监控工作台](#监控工作台)。
 
 ---
 
@@ -212,7 +212,7 @@ GATEWAY_URL=https://你的域名 GATEWAY_KEY=你的key bash scripts/smoke.sh
 git clone https://github.com/uzxz/CF_AOG.git
 cd CF_AOG
 npm install
-npm test            # 26 个离线测试，mock 上游，不需要任何凭据
+npm test            # 52 个离线测试，mock 上游，不需要任何凭据
 cp .dev.vars.example .dev.vars
 ```
 
@@ -381,6 +381,46 @@ const MODEL_MAP = Object.freeze({
 
 改完 `npm test`，push 后 Workers Builds 自动部署（或手动 `npm run deploy`）。完整清单见 [Workers AI 模型目录](https://developers.cloudflare.com/workers-ai/models/)。
 
+## 监控工作台
+
+访问 `https://<你的 Worker>/dashboard`，输入 `GATEWAY_KEY` 即可看到用量看板（整页与 API 都需要鉴权，key 只存在浏览器 `sessionStorage`）。
+
+**支持的范围筛选**：今天、近 7 天、近 30 天、本年、**自定义起止日期**（含首尾，最长 92 天，与 Analytics Engine 3 个月保留期一致）。全部按 **UTC** 计算，与 Cloudflare 00:00 UTC 重置一致 —— 页面顶部有显著标注。
+
+**显示内容**：所选范围的 Neurons 消耗、请求数、成功率、Input/Output tokens、平均延迟、按天用量趋势、模型分布（调用数 / Neurons / 占比）、错误分布；「今天」范围额外显示 10,000 Neurons/天 的额度进度条。
+
+**启用方式**：`wrangler.toml` 里已经配置好两个**可选** binding，重新部署后自动生效：
+
+```toml
+[[analytics_engine_datasets]]
+binding = "AOG_METRICS"
+dataset = "cf_aog_metrics"
+
+[analytics]
+binding = "ANALYTICS_SQL"
+```
+
+- Analytics Engine 数据集**不需要预创建**，表在首次写入时自动生成；`ANALYTICS_SQL` 是 Wrangler ≥ 4.145 的免 token 查询 binding。
+- `.dev.vars.example` **不新增任何 secret**，一键部署仍只填原来的 3 个值。
+- 已部署过的旧实例：在 dashboard → Worker → **Settings → Bindings** 补上这两个 binding（或重新部署一次），否则看板显示「监控未启用」，但**网关推理功能完全不受影响**。
+- 设 `METRICS_ENABLED = "false"` 可一键关闭写入。
+
+**为什么不会产生额外费用**：
+
+- 只要保持 **Workers Free 不升级**，所有资源都是「超额即失败，不计费」—— 这是 $0 的根本保障。
+- Workers Analytics Engine Free 含 **100,000 写入/天 + 10,000 读查询/天**；本方案每次推理写 1 个点、每次看板刷新 4 条聚合 SQL + 60 秒缓存 + 30 秒最小刷新间隔，以「偶尔看」的频率用量极低。
+- 工作台**不调用 Workers AI**，不消耗任何 Neurons。
+- 官方目前明确表示 Analytics Engine「暂不计费」；未来若开始计费，Free 计划仍按硬上限处理（此为 `[INFERENCE]`，非官方承诺）。
+
+**隐私**：只记录模型别名、状态类别、错误码摘要、Neurons、tokens、延迟等**元数据**；不记录 prompt / completion 正文、不记录 token / IP。SQL 全部是静态常量 + 官方 `$1/$2` 位置参数绑定，不接受客户端传入的 SQL。
+
+**已知限制**：
+
+- 数据保留 **3 个月**，更早的范围会显示为空（本年视图可能因此缺前几个月）。
+- **SSE 流式请求的 Neurons 记为 0**：上游 usage 在最后一个 chunk，Worker 不缓冲整条流；流式用量会被低估，页面相应位置有说明。
+- 本地 `wrangler dev --local` 下 `ANALYTICS_SQL` 无本地实现（总是访问远端），看板会显示「部分统计不可用」但不会 500；要看真实数据请部署后用线上地址访问。
+- 详细设计见 [docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)。
+
 ---
 
 # 五、排错
@@ -400,6 +440,8 @@ const MODEL_MAP = Object.freeze({
 | 超出免费额度、请求失败 | Free 每天 10,000 Neurons，00:00 UTC 重置 | 等重置，或升级 Workers Paid |
 | sub2api 报 404 / 空回复 | 上游被当成 Responses 转发 | 设 `openai_responses_mode: force_chat_completions`，且客户端只走 `/v1/chat/completions` |
 | `content` 为空 | reasoning 模型输出在 `reasoning_content` | 本 Worker 已自动归一；若仍为空改用非 reasoning 模型 |
+| `/dashboard` 显示「监控未启用」 | 旧实例没有 `AOG_METRICS` / `ANALYTICS_SQL` binding | dashboard → Worker → Settings → Bindings 补上，或重新部署；推理功能不受影响 |
+| 看板显示「部分统计不可用」 | 本地 dev 下 Analytics SQL 无本地实现，或某条查询失败 | 用线上地址访问；查询失败只影响该视图，其他数据照常显示 |
 | 本地 `wrangler dev` 报 unknown argument | wrangler 4 没有 `--local-strict` | 用 `npm run dev` 或 `npx wrangler dev --local` |
 
 ---
@@ -420,7 +462,7 @@ const MODEL_MAP = Object.freeze({
 
 | 检查 | 结果 |
 | --- | --- |
-| `npm test`（离线，mock 上游） | **26/26 通过** |
+| `npm test`（离线，mock 上游） | **52/52 通过** |
 | `/health`、`/v1/models` | 200 |
 | 无鉴权 / 错误 key | 401 |
 | `/v1/responses`、未知模型 | 404 / 400 |
@@ -436,14 +478,20 @@ const MODEL_MAP = Object.freeze({
 
 ```
 CF_AOG/
-├── src/worker.js            # Worker 主体（URL 安全校验、别名映射、SSE 归一）
-├── wrangler.toml            # Wrangler 配置（仅非敏感默认值）
+├── src/worker.js            # Worker 主体（URL 安全校验、别名映射、SSE 归一、路由分发）
+├── src/metrics.js           # 埋点与汇总编排（日期范围、缓存、降级）
+├── src/ae-sql.js            # 4 条静态参数化 SQL 常量
+├── src/ae-params.js         # 日期 → 纯数字位置参数
+├── src/ae-query.js          # Analytics SQL binding 执行层
+├── src/dashboard.js         # 监控工作台静态页面（内联 CSS/JS）
+├── wrangler.toml            # Wrangler 配置（含两个可选监控 binding）
 ├── package.json             # 含 cloudflare.bindings 说明，供一键部署引导页展示
 ├── .dev.vars.example        # 一键部署读取的 secrets 声明（占位值，必须提交）
 ├── .gitignore               # 忽略 .dev.vars / .wrangler / node_modules
 ├── scripts/smoke.sh         # 本地/线上冒烟脚本
-├── tests/gateway.test.mjs   # 26 个离线单元测试
-├── docs/DASHBOARD_DESIGN.md # 监控工作台设计方案（规划稿）
+├── tests/gateway.test.mjs   # 26 个网关离线单元测试
+├── tests/dashboard.test.mjs # 26 个监控工作台离线单元测试
+├── docs/DASHBOARD_DESIGN.md # 监控工作台设计说明
 └── README.md
 ```
 

@@ -14,6 +14,20 @@ compatibility_flags = ["nodejs_compat"]
 # 非敏感的默认参数；敏感值一律走 secret / .dev.vars.example
 MAX_TOKENS_CAP = "512"
 MAX_TOKENS_DEFAULT = "256"
+# 设为 "false" 可关闭用量埋点（工作台查询仍可用）
+METRICS_ENABLED = "true"
+
+# ---- 监控统计（可选）----
+# 这两个 binding 都可选：不配置时网关推理功能完全不变，/dashboard 显示「监控未启用」。
+# 数据集只需 binding + dataset，不需要预创建资源 ID；表在首次写入时自动创建。
+# 官方目前明确「暂不计费」；保持 Workers Free 计划即不会产生账单。
+[[analytics_engine_datasets]]
+binding = "AOG_METRICS"
+dataset = "cf_aog_metrics"
+
+# Analytics SQL binding（Wrangler >= 4.145）：Worker 内免 token 查询，无需新增 secret。
+[analytics]
+binding = "ANALYTICS_SQL"
 
 [observability]
 enabled = true

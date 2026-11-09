@@ -1,8 +1,9 @@
-# 监控统计工作台 · 设计方案（规划稿，未实现）
+# 监控统计工作台 · 设计说明（已实现）
 
-> 状态：**设计阶段**。本文只做方案规划与取舍，不包含任何功能代码。`src/worker.js` 当前行为不变。
-> 目标：给 CF_AOG 增加一个「自己能看到用量」的 Web 工作台，用于回答四个问题 ——
-> **用了多少、还剩多少额度、哪个模型最费、有没有异常/失败**。
+> 状态：**已定方案并实现**。实现说明见本文 §4.6 与 `README.md` 的「监控工作台」小节。
+> 目标：偶尔看看**今天 / 最近几天 / 周 / 月 / 年**用了多少，并支持**自定义日期范围筛选**。
+>
+> **不出账单的硬前提**：保持 **Workers Free 计划不升级**。Free 下所有资源（含 Analytics Engine）都是「超额即失败，不计费」；$0 费用的保障来自计划本身，而不是某个资源。官方目前明确表示 Analytics Engine「暂不计费」，未来若开始计费，Free 计划仍按硬上限处理（`[INFERENCE]`，非官方承诺）。
 
 ---
 
@@ -94,18 +95,18 @@
 工作台页面 `GET /dashboard` 返回静态 HTML（内联 CSS/JS，无外部依赖、无构建）。
 页面 JS 调 `GET /dashboard/api/summary?range=24h`（携带与网关相同的 Bearer key），Worker 用 **Analytics SQL binding** 执行预置聚合 SQL，返回小 JSON。
 
-预置查询（参数化，不接受任意 SQL，**避免注入**）：
+预置查询（`analytics` SQL binding，**全部参数化**，不接受任意 SQL）：
 
 | 视图 | SQL 聚合 | 返回 |
 | --- | --- | --- |
-| 今日概览 | `SUM(neurons)`、`SUM(请求数)`、成功率、`AVG(延迟)` | 1 行 |
-| 额度进度 | 今日 `SUM(neurons)` / 10,000 | 百分比 + 预计耗尽时间 |
-| 时间趋势 | 按小时 `toStartOfHour` 分组 | ≤ 24 行 |
+| 概览 | `SUM(neurons)`、`SUM(请求数)`、成功率、`AVG(延迟)` | 1 行 |
+| 时间趋势 | 按小时 / 天分组（依所选范围自动选桶） | ≤ 31 行 |
 | 模型分布 | 按 `index1` 分组的调用数 / Neurons / 平均 tokens | ≤ 12 行 |
 | 错误分布 | 按 `blob1`/`blob4` 分组 | ≤ 10 行 |
-| 最近请求 | 按时间倒序，只取元数据 | ≤ 20 行 |
 
-> 一个重要限制：Analytics Engine 的 SQL API 需要 **Account Analytics: Read** 权限的 token；若用 `analytics` SQL binding（Wrangler ≥ 4.145）则在 Worker 内免 token 查询，但需要确认一键部署是否会自动配置该 binding `[INFERENCE]`。**兜底方案**：额外增加一个可选 secret `CF_ANALYTICS_TOKEN`（仅 Account Analytics Read），走 REST SQL API；未配置时工作台显示「查询未配置，写入仍在进行」。
+> **实现修正**：Analytics Engine 的 SQL **不支持 `UNION` / `JOIN`**（官方文档明确「queries can only operate on a single table」），因此设计稿里「合并成一条 SQL」的假设**不成立**。实际实现为 **4 条独立聚合查询 + 60 秒 `caches.default` 缓存 + 页面最小刷新间隔**。以「偶尔看」的频率，每次刷新 4 次读查询，远低于 Free 的 10,000 次/天。
+
+> 查询走 **`analytics` SQL binding**（`[analytics] binding = "ANALYTICS_SQL"`，需 Wrangler ≥ 4.145，本项目 4.158 满足）：Worker 内免 token 查询，作用域自动限定为该账户，**不需要新增第四个 secret**。数据集引用名 `events.analyticsEngine."cf_aog_metrics"`，列名仍是 `index1` / `blob1` / `double1`。未配置该 binding 时降级显示「查询未配置，写入仍在进行」。
 
 ### 4.4 页面内容（低保真布局）
 
@@ -132,17 +133,21 @@
 
 ### 4.5 配置与一键部署兼容
 
-`wrangler.toml` 新增（**可选**，有默认值）：
+`wrangler.toml` 新增两个**可选**绑定：
 
 ```toml
 [[analytics_engine_datasets]]
 binding = "AOG_METRICS"
 dataset = "cf_aog_metrics"
+
+[analytics]
+binding = "ANALYTICS_SQL"
 ```
 
-- 一键部署的自动供给支持 Analytics Engine 数据集（官方支持的计算/存储资源之一），但需要在引导页确认资源名 `[INFERENCE]`。
-- 老部署（无此 binding）：代码检测 `env.AOG_METRICS` 是否存在，不存在就跳过写入；`/dashboard` 显示「监控未启用，按 README 添加 binding」。
-- `.dev.vars.example` **不新增必填 secret**；`CF_ANALYTICS_TOKEN` 作为可选兜底写进文档，不进 secrets 声明（否则一键部署会强制弹框）。
+- Analytics Engine 数据集只需 `binding` + `dataset`，**不需要预创建资源 ID**；表在首次写入时自动创建，一键部署无额外供给步骤。
+- 老部署（无这些 binding）：代码检测 `env.AOG_METRICS` / `env.ANALYTICS_SQL` 是否存在，不存在就跳过写入 / 显示「未启用」，网关功能完全不变。
+- `.dev.vars.example` **不新增任何 secret**，一键部署仍只填原来的 3 个值。
+- 可选开关 `METRICS_ENABLED = "false"` 可一键关闭写入。
 
 ### 4.6 新增文件规划
 
@@ -169,9 +174,10 @@ dataset = "cf_aog_metrics"
 | Workers AI Neurons | 10,000/天 | **0**（工作台不调 AI） | 不影响核心额度 |
 
 **风险点**：官方明确 Analytics Engine「未来会开始计费」（Paid 1000 万写入/月 + 100 万查询/月包含，超出 $0.25/百万写入、$1/百万查询）。届时的成本放大点是「每次页面刷新 = 多次读查询」。缓解：
-1. 页面查询结果在 Worker 内用 `caches.default` 缓存 60 秒；
-2. 一次刷新合并成**一条** SQL（用 `UNION ALL` / 多聚合）而不是 6 条；
-3. 提供 `METRICS_ENABLED` 开关，可一键关闭写入。
+1. 页面查询结果在 Worker 内用 `caches.default` 缓存 **60 秒**；
+2. 一次刷新合并为 **4 条聚合 SQL**（Analytics Engine 不支持 UNION/JOIN，无法合成 1 条），每条都带 `LIMIT`、返回少量行；
+3. 页面设**最小刷新间隔 30 秒**，「偶尔看」的场景下用量极低；
+4. 提供 `METRICS_ENABLED` 开关，可一键关闭写入。
 
 ---
 
@@ -188,23 +194,36 @@ dataset = "cf_aog_metrics"
 
 ## 7. 分阶段实施计划
 
-| 阶段 | 交付 | 验收 |
+| 阶段 | 交付 | 状态 |
 | --- | --- | --- |
-| **P0 设计（本轮）** | 本文 | 用户确认方案与范围 |
-| **P1 埋点** | `src/metrics.js` + worker 接入 + 单测 | 26 → 约 32 个测试通过；无 binding 时行为与现在完全一致 |
-| **P2 查询 API** | `/dashboard/api/summary`，SQL binding 或 token 兜底 | 本地用 `wrangler dev --remote` 验证能读到数据点 |
-| **P3 页面** | `/dashboard` 静态页 + 缓存 + 复制 curl | 浏览器打开能看到今日额度、趋势、模型分布 |
-| **P4 文档与部署** | README + docs + 可选 binding + 一键部署回归 | 新一键部署能自动建数据集；老部署不报错 |
+| **P0 设计** | 本文 | ✅ 已完成，方案经用户确认 |
+| **P1 埋点** | `src/metrics.js` + worker 接入 + 单测 | ✅ 已实现 |
+| **P2 查询 API** | `/dashboard/api/summary`，`analytics` SQL binding，日期范围参数 | ✅ 已实现 |
+| **P3 页面** | `/dashboard` 静态页 + 今天/7天/30天/本年/自定义筛选 + 缓存 | ✅ 已实现 |
+| **P4 文档与部署** | README 启用步骤、可选 binding、两仓库同步 | ✅ 已实现 |
 
 ---
 
-## 8. 待确认的决策点（需要你拍板）
+## 8. 已定方案（用户已确认）
 
-1. **是否接受新增一个 Analytics Engine binding**（会让 `wrangler.toml` 从「零资源」变成「一个可选资源」）？还是坚持零绑定、改用「本地/外部看板」方案？
-2. **查询走哪条路**：优先 `analytics` SQL binding（免 token，但需 Wrangler ≥ 4.145 且一键部署兼容性待验证），还是直接用 `CF_ANALYTICS_TOKEN` REST SQL API（多一个可选 secret，但确定可用）？
-3. **页面鉴权**：HTML 页面公开、只有 API 要 key（便于分享只读视图），还是整页都要 key？
-4. **是否需要按「调用方」拆分统计**（例如给不同下游分配不同 `GATEWAY_KEY` 前缀）？当前设计只有一把共享 key，无法区分。
-5. **保留期 3 个月是否够**？若需要长期趋势，得另外做每日汇总（D1/KV 存日聚合，会引入第二个资源）。
+用户要求：**偶尔看看今天 / 最近几天 / 周 / 月 / 年用了多少，并支持筛选日期范围**，且**不产生额外费用**。据此确定：
+
+| # | 决策 | 结论 | 落实方式 |
+| --- | --- | --- | --- |
+| 1 | 是否新增 binding | ✅ 接受，但**可选** | 无 binding 时网关行为完全不变，看板显示「未启用」 |
+| 2 | 查询通道 | ✅ **`analytics` SQL binding（零新增 secret）** | `[analytics] binding = "ANALYTICS_SQL"`；不做 token 兜底 |
+| 3 | 页面鉴权 | ✅ **整页 + API 都要 `GATEWAY_KEY`** | 复用现有 key，用量数据不公开 |
+| 4 | 按调用方拆分 | ❌ 不做 | 当前只有一把共享 key，拆分收益为零 |
+| 5 | 每日汇总 / 长期趋势 | ❌ 不做，直接用 Analytics Engine 的 **3 个月**保留期 | 日期范围筛选覆盖今天 / 7 天 / 30 天 / 本年 / 自定义 |
+
+**不出账单的硬约束（写进实现）**：
+
+- 保持 **Workers Free** 不升级 —— 这是 $0 的根本保障；
+- 查询 **4 条 + 缓存 60 秒 + 页面最小刷新间隔**，防止误刷放大读查询；
+- 提供 `METRICS_ENABLED` 开关，可随时关掉写入；
+- 工作台**不调用 Workers AI**，不消耗任何 Neurons。
+
+**日期范围口径**：全部按 **UTC**（与 Cloudflare 的 00:00 UTC 重置一致），页面标注「时间为 UTC」，避免与本地日期错位。上年及更早数据超出 3 个月保留期会显示为空，这是预期行为。
 
 ---
 
