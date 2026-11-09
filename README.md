@@ -8,6 +8,7 @@
 - **零基础设施**：一个 Worker，不需要 KV / D1 / R2 / 服务器。
 - **凭据隔离**：Cloudflare API 令牌只存在 Worker Secret 里，不下发给下游客户端。
 - **额度保护**：默认把 `max_tokens` 钳制在 512，防止一次请求耗尽每日免费额度。
+- **监控工作台（规划中）**：用量 / 额度 / 模型分布 / 错误统计的自带看板，方案见 [docs/DASHBOARD_DESIGN.md](docs/DASHBOARD_DESIGN.md)（当前仅为设计稿，尚未实现）。
 
 ---
 
@@ -86,6 +87,40 @@ Workers AI 的 embedding 模型极便宜（一条短文本 0.026 Neurons）。�
 
 **一句话**：Cloudflare 提供的是「便宜好用的模型」，本 Worker 把它变成「任何 OpenAI-compatible 工具都能直接插上、且不会突然出账单的标准插座」。附带还有：隐藏真实 Cloudflare 令牌、限制 `max_tokens` 保护免费额度、发请求前做 host 安全校验（拒绝 `localhost` / 环回 / 私有 / 保留地址）、上游错误码原样透传。
 
+### 和其他「免费模型」比：以 opencode 为例
+
+结论：**Cloudflare 是「有公开配额、可被调用的免费 API」，opencode 免费模型是「限时、限客户端、不公开额度的试用」**。两者不是一类东西 —— opencode 按官方规定**不能从 OpenCode 之外调用**，因此无法作为本项目的上游。
+
+| 对比项 | Cloudflare Workers AI Free | opencode 免费模型 |
+| --- | --- | --- |
+| 定位 | 正式的免费额度（serverless 推理 API） | 限时反馈/试用，非永久服务，列表会轮换 |
+| **能否从自己的代码调用** | ✅ 标准 REST / OpenAI 兼容端点 | ❌ 官方明确禁止；外部调用返回 403 `FreeTierError`，带 API key 也一样 |
+| 额度是否公开 | ✅ **10,000 Neurons/天** + 按任务类型的 RPM 白纸黑字 | ❌ 只说「有每日请求上限」，数字动态、不公开 |
+| 速率限制 | 文本生成 **300 次/分钟**、Embeddings 3000/分钟、文生图 720/分钟；部分小模型另有单独限额 | 未公开；社区实测另有短时频率上限 |
+| 计量方式 | Neurons（按模型 input/output 折算，响应直接给 `usage.neurons`） | 请求次数，按**出口 IP** 分桶，免费模型共享同一个桶 |
+| 重置 | 00:00 UTC | 00:00 UTC（同样按 UTC，容易与本地日期错位） |
+| 共享影响 | 不按 IP 共享，是你账户自己的额度 | 同出口 IP 的其他用户用完会连累你（校园网 / 办公网 / VPN 常见） |
+| 超额后果 | 直接失败，**不会扣费** | 429 + `retry-after`（最长 24h），引导升级 Go（$10/月起） |
+| 升级路径 | Workers Paid $5/月，仍含 10,000/天，超出按 `$0.011 / 1,000 Neurons` | Go $10/月（Go Plus $40/月），按 5 小时 / 周 / 月窗口计 |
+| 模型稳定性 | 目录稳定，弃用提前公告 | 每个都标「for a limited time」，无结束日期 |
+| 能力 | 文本、embedding、图像、ASR、翻译、分类等 | 主要面向编码 agent，200K 上下文、无 vision |
+| 数据条款 | 按 Cloudflare 账户条款 | 部分免费模型明确「数据可能用于改进模型 / 保留 30 天 / 不要提交机密」 |
+| 可观测性 | dashboard 可查 Neuron 用量 | 无剩余额度计数器，只能从 429 推断 |
+
+**Cloudflare Free 的三层限制**（都会「超额即失败」而非扣费）：
+
+1. **Neurons**：10,000/天 —— 对本网关是实际瓶颈；
+2. **按任务速率**：文本生成 300 RPM（要连续跑满 33 分钟才会先撞到它，Neurons 早用完了）；
+3. **Worker 运行时**：请求 100,000/天、CPU 10 ms/调用、子请求 50/次。
+
+另外 `kimi-k2.7-code`、`glm-5.2`、`kimi-k2.6` 在 Free 上直接 403（error 5035），需 Paid。
+
+**opencode 侧的数字仅供说明，不是承诺**：官方 Go FAQ 只说「free models have a daily request limit」；社区 issue 与第三方实测记录到约 **168 ~ 939 次/天**的波动（维护者公开表示额度随容量与需求动态调整），2026-10 后明显收紧。这些内容来自社区实测，可能随时变化，请以官方文档为准。
+
+**对本项目意味着什么**：opencode 的免费模型更适合在它自己的客户端里做交互式编码；Cloudflare 这套适合「给自己的程序接入一个稳定、可规划、按官方允许的免费额度运行的小模型后端」。社区里「用代理 / 换 IP 绕过免费额度接进别的客户端」的做法与官方条款冲突，本项目不采用，也不需要 —— Cloudflare 本身就是官方允许的免费 API 用法。
+
+参考：[Workers AI Pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) · [Workers AI Limits](https://developers.cloudflare.com/workers-ai/platform/limits/) · [opencode Free models](https://opencode.ai/docs/models/#free-models) · [Console Models（数据条款）](https://opencode.ai/v2/docs/console/models/) · [Inference API（403）](https://dev.opencode.ai/v2/docs/console/api/inference) · [Go FAQ](https://opencode.ai/console/go) · [社区实测](https://github.com/anomalyco/opencode/issues/57540)
+
 ---
 
 # 一、一键部署到 Cloudflare（推荐）
@@ -102,7 +137,7 @@ Workers AI 的 embedding 模型极便宜（一条短文本 0.026 Neurons）。�
 
 > **仓库必须是 Public**，否则 Cloudflare 无法克隆（[官方限制](https://developers.cloudflare.com/workers/platform/deploy-buttons/#limitations)）。本仓库请设为公开。
 
-> ⚠️ **一键部署会克隆出一个新仓库**（如 `cf-ai-openai-gateway`），Workers Builds 连的是那个**副本**，不是源仓库 `CF_AOG`。之后要更新线上代码，请 push 到副本仓库，或在本地用 `npm run deploy` 直接部署。
+> ⚠️ **一键部署会克隆出一个新仓库**（如 `cf-ai-openai-gateway`），Workers Builds 连的是那个**副本**，不是源仓库 `CF_AOG`。之后要更新线上代码，请 push 到副本仓库，或在本地用 `npm run deploy` 直接部署。改 secret 也不会触发构建，需一次部署动作。
 
 ## 部署步骤
 
@@ -359,6 +394,7 @@ const MODEL_MAP = Object.freeze({
 | `/v1/models` 只有 2 个模型 | 旧版本硬编码了 2 个别名 | 更新到最新版本（12 个），重新部署后在 sub2api 重新拉取模型列表 |
 | push 到 `CF_AOG` 后线上没变化 | 一键部署克隆了**副本仓库**，Workers Builds 连的是副本 | push 到克隆出来的副本仓库；或本地 `npm run deploy`；或在 dashboard 的 Settings → Builds 里改连接的仓库 |
 | 改了 secret 但没生效 | 改 secret 不会触发构建 | 手动 Redeploy 一次，或往 production 分支 push 一个 commit |
+| 一键部署按钮报「GitHub 授权已过期」 | 账户级 GitHub App 授权失效 | <https://github.com/settings/installations> 卸载并重装 Cloudflare Workers and Pages，再重新打开按钮 |
 | 请求返回 401 | `GATEWAY_KEY` 与 sub2api 里填的不一致 | 两边对齐；注意不要带多余空格 |
 | 返回 `403 / error 5035` | 用了仅 Workers Paid 的模型 | 换 Free 可用模型，或升级 Paid |
 | 超出免费额度、请求失败 | Free 每天 10,000 Neurons，00:00 UTC 重置 | 等重置，或升级 Workers Paid |
@@ -407,6 +443,7 @@ CF_AOG/
 ├── .gitignore               # 忽略 .dev.vars / .wrangler / node_modules
 ├── scripts/smoke.sh         # 本地/线上冒烟脚本
 ├── tests/gateway.test.mjs   # 26 个离线单元测试
+├── docs/DASHBOARD_DESIGN.md # 监控工作台设计方案（规划稿）
 └── README.md
 ```
 
