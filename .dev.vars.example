@@ -1,0 +1,15 @@
+# Cloudflare "Deploy to Cloudflare" 一键部署会读取本文件，
+# 把下面每个键作为 Worker Secret 在部署引导页里提示用户填写。
+# 本文件只含占位值，不含任何可用凭据；请勿把真实凭据提交进仓库。
+
+# 下游网关（如 sub2api）访问本 Worker 时使用的 Bearer Key。
+# 建议用 `openssl rand -hex 32` 生成，并保存下来填进 sub2api 的 api_key。
+GATEWAY_KEY=replace-with-a-random-key
+
+# Workers AI REST API 令牌。
+# 在 Cloudflare dashboard → AI → Workers AI → Use REST API → Create a Workers AI API Token 创建；
+# 需要 Workers AI - Read 与 Workers AI - Edit 权限。
+CF_AI_TOKEN=replace-with-your-workers-ai-api-token
+
+# Cloudflare 账户 ID（dashboard 右侧或 `wrangler whoami` 可查看）。
+CF_ACCOUNT_ID=replace-with-your-cloudflare-account-id

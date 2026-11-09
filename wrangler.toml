@@ -1,0 +1,19 @@
+name = "cf-ai-openai-gateway"
+main = "src/worker.js"
+compatibility_date = "2026-11-09"
+compatibility_flags = ["nodejs_compat"]
+
+# 本地开发：把凭据写进 .dev.vars（已加入 .gitignore）。
+# 一键部署 / 生产：secrets 由 .dev.vars.example 声明，
+#   Cloudflare 在部署引导页提示填写，或手动 `wrangler secret put`。
+# 源码与配置文件里不放任何凭据。
+# 需要的 secrets：GATEWAY_KEY / CF_AI_TOKEN / CF_ACCOUNT_ID
+# 可选变量（非敏感，见下方 [vars]）：MAX_TOKENS_CAP / MAX_TOKENS_DEFAULT
+
+[vars]
+# 非敏感的默认参数；敏感值一律走 secret / .dev.vars.example
+MAX_TOKENS_CAP = "512"
+MAX_TOKENS_DEFAULT = "256"
+
+[observability]
+enabled = true

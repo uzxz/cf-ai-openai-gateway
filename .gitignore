@@ -1,0 +1,20 @@
+# 凭据与本地状态，绝不进版本库
+.dev.vars
+.dev.vars.local
+.dev.vars.*
+# .dev.vars.example 是 Cloudflare 一键部署读取的 secrets 声明模板，必须提交
+!.dev.vars.example
+.wrangler/
+node_modules/
+dist/
+
+# 环境变量备份
+.env
+.env.*
+
+# 本地工具状态目录
+.mimosa/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
