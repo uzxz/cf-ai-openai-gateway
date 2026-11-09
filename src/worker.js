@@ -16,12 +16,42 @@
 
 const UPSTREAM_HOST = "api.cloudflare.com";
 
-// 别名 -> Workers AI 模型名。这两个模型已用当前账户实测可用（非 reasoning）。
+// 别名 -> Workers AI 模型名。
+// 下列模型均已用真实账户实测（2026-11-09，Workers Free 计划，HTTP 200）。
+// 新增模型只需在这里加一行，/v1/models 与 sub2api 的模型列表会自动同步。
+// reasoning 类模型的输出会被归一到 content（见 foldReasoning / normalizeSseStream）。
+// 注意：@cf/moonshotai/kimi-k2.7-code、@cf/zai-org/glm-5.2 需 Workers Paid，
+//       Free 计划返回 403 / error 5035，故不列入。
 const MODEL_MAP = Object.freeze({
+  // —— 通用 / 高质量 ——
   "gpt-4o-mini": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "gpt-4o": "@cf/google/gemma-4-26b-a4b-it",
+  "llama-3.3-70b": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "gemma-4-26b": "@cf/google/gemma-4-26b-a4b-it",
+  "llama-4-scout": "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "mistral-small-3.1": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+  "nemotron-3-120b": "@cf/nvidia/nemotron-3-120b-a12b",
+  // —— 推理 / 代码 ——
+  "glm-4.7-flash": "@cf/zai-org/glm-4.7-flash",
+  "gpt-oss-120b": "@cf/openai/gpt-oss-120b",
+  "gpt-oss-20b": "@cf/openai/gpt-oss-20b",
+  "qwen3-30b": "@cf/qwen/qwen3-30b-a3b-fp8",
+  // —— 极轻量 / 低成本 ——
+  "granite-4-micro": "@cf/ibm-granite/granite-4.0-h-micro",
 });
 const ALIAS_LIST = Object.keys(MODEL_MAP);
+
+// 部署引导页占位值：这些值一旦出现在 secret 里，说明用户没填真实值。
+// 提前拦截，避免把占位字符串拼进上游 URL 后返回难以理解的 404。
+const PLACEHOLDER_VALUES = new Set([
+  "replace-with-a-random-key",
+  "replace-with-your-workers-ai-api-token",
+  "replace-with-your-cloudflare-account-id",
+  "replace-with-your-account-id",
+  "your-cloudflare-account-id",
+  "your-account-id",
+  "",
+]);
 
 /**
  * 发请求前的 URL 安全校验：
@@ -227,6 +257,19 @@ export default {
     const accountId = env.CF_ACCOUNT_ID;
     if (!cfToken || !accountId) {
       return json({ error: "upstream credentials missing (CF_AI_TOKEN / CF_ACCOUNT_ID)" }, 500);
+    }
+
+    // 占位值拦截：一键部署时若未替换示例值，这里直接给出可操作的报错，
+    // 而不是让 Cloudflare 返回 "Could not route to /accounts/replace-with-..."。
+    const unresolved = Object.entries({ GATEWAY_KEY: expected, CF_AI_TOKEN: cfToken, CF_ACCOUNT_ID: accountId })
+      .filter(([, v]) => PLACEHOLDER_VALUES.has(String(v).trim()) || /^replace-with/i.test(String(v).trim()))
+      .map(([k]) => k);
+    if (unresolved.length) {
+      return json({
+        error: "upstream credentials are still placeholder values",
+        unresolved,
+        hint: "在 Cloudflare dashboard → Worker → Settings → Variables and Secrets 把上述值改成真实值；或用 `wrangler secret put <NAME>` 重新设置后重新部署。",
+      }, 500);
     }
 
     let body;

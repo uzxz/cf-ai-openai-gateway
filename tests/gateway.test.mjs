@@ -156,7 +156,10 @@ test("/health 不触达上游", async () => {
   assert.equal(res.status, 200);
   const j = await res.json();
   assert.equal(j.status, "ok");
-  assert.deepEqual(j.models, ["gpt-4o-mini", "gpt-4o"]);
+  assert.equal(j.models.length, 12);
+  assert.ok(j.models.includes("gpt-4o-mini"));
+  assert.ok(j.models.includes("glm-4.7-flash"));
+  assert.ok(j.models.includes("granite-4-micro"));
 });
 
 test("/v1/models 返回模型列表", async () => {
@@ -195,6 +198,18 @@ test("缺少上游凭据 -> 500", async () => {
 test("不支持的模型 -> 400", async () => {
   const res = await worker.fetch(req("/v1/chat/completions", { body: { model: "claude-3", messages: [] } }), ENV);
   assert.equal(res.status, 400);
+});
+
+test("上游凭据仍是占位值 -> 500 且给出明确提示", async () => {
+  const res = await worker.fetch(
+    req("/v1/chat/completions", { body: { model: "gpt-4o-mini", messages: [] } }),
+    { ...ENV, CF_ACCOUNT_ID: "replace-with-your-cloudflare-account-id" },
+  );
+  assert.equal(res.status, 500);
+  const j = await res.json();
+  assert.equal(j.error, "upstream credentials are still placeholder values");
+  assert.deepEqual(j.unresolved, ["CF_ACCOUNT_ID"]);
+  assert.match(j.hint, /Variables and Secrets/);
 });
 
 test("chat/completions: 模型别名映射 + max_tokens 钳制 + 上游鉴权", async () => {

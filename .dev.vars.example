@@ -1,5 +1,7 @@
-# Cloudflare "Deploy to Cloudflare" 一键部署会读取本文件，
-# 把下面每个键作为 Worker Secret 在部署引导页里提示用户填写。
+# ⚠️ 关键：一键部署时必须在引导页把下面每个 replace-with-... 都换成真实值。
+# 若保留占位值，/v1/models 能正常返回，但真实推理会报
+# "Could not route to /accounts/replace-with-your-cloudflare-account-id/..."（error 7003）。
+# Worker 会在占位值未替换时直接返回明确的 500 提示。
 # 本文件只含占位值，不含任何可用凭据；请勿把真实凭据提交进仓库。
 
 # 下游网关（如 sub2api）访问本 Worker 时使用的 Bearer Key。

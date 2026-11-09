@@ -40,6 +40,8 @@
 
 > **仓库必须是 Public**，否则 Cloudflare 无法克隆（[官方限制](https://developers.cloudflare.com/workers/platform/deploy-buttons/#limitations)）。本仓库请设为公开。
 
+> ⚠️ **一键部署会克隆出一个新仓库**（如 `cf-ai-openai-gateway`），Workers Builds 连的是那个**副本**，不是源仓库 `CF_AOG`。之后要更新线上代码，请 push 到副本仓库，或在本地用 `npm run deploy` 直接部署。
+
 ## 部署步骤
 
 **1. 点按钮**
@@ -61,7 +63,7 @@
 | **CF_AI_TOKEN** | 上面创建的 Workers AI API 令牌 |
 | **CF_ACCOUNT_ID** | 你的 Cloudflare 账户 ID |
 
-> 这 3 个 secret 由仓库里的 `.dev.vars.example` 声明，Cloudflare 会自动识别并在引导页生成输入框；每个字段的说明来自 `package.json` 的 `cloudflare.bindings`。值只会存为 Worker Secret，**不会写回仓库**。
+> 这 3 个 secret 由仓库里的 `.dev.vars.example` 声明，Cloudflare 会自动识别并在引导页生成输入框；每个字段的说明来自 `package.json` 的 `cloudflare.bindings`。**必须把每个 `replace-with-...` 占位值换成真实值**，否则 `/v1/models` 能返回但推理会 404。值只会存为 Worker Secret，不会写回仓库。
 
 **3. 点 Create and deploy**
 
@@ -71,14 +73,12 @@ Cloudflare 会克隆仓库、用 Workers Builds 构建并部署。完成后得�
 https://cf-ai-openai-gateway.<你的子域>.workers.dev
 ```
 
-记为 `GATEWAY_URL`。之后往新仓库的 `main` 分支 push 代码会自动重新部署。
+记为 `GATEWAY_URL`。之后往**克隆出来的副本仓库**的 `main` 分支 push 代码会自动重新部署。
 
 **4. 验证**
 
 ```bash
 curl -s "${GATEWAY_URL}/health"
-# {"status":"ok","upstream":"api.cloudflare.com","models":["gpt-4o-mini","gpt-4o"]}
-
 curl -s "${GATEWAY_URL}/v1/models"
 
 curl -s -X POST "${GATEWAY_URL}/v1/chat/completions" \
@@ -115,7 +115,7 @@ GATEWAY_URL=https://你的域名 GATEWAY_KEY=你的key bash scripts/smoke.sh
 git clone https://github.com/uzxz/CF_AOG.git
 cd CF_AOG
 npm install
-npm test            # 25 个离线测试，mock 上游，不需要任何凭据
+npm test            # 26 个离线测试，mock 上游，不需要任何凭据
 cp .dev.vars.example .dev.vars
 ```
 
@@ -212,7 +212,7 @@ jobs:
 
 **模型名二选一**：
 
-- 别名：`gpt-4o-mini`（→ `@cf/meta/llama-3.3-70b-instruct-fp8-fast`）、`gpt-4o`（→ `@cf/google/gemma-4-26b-a4b-it`）
+- 别名：`gpt-4o-mini`（→ `@cf/meta/llama-3.3-70b-instruct-fp8-fast`）、`gpt-4o`（→ `@cf/google/gemma-4-26b-a4b-it`）等 12 个，见[可用模型](#可用模型)
 - 原始名：任意 Free 计划可用的 `@cf/...`（如 `@cf/zai-org/glm-4.7-flash`）；reasoning 模型的输出已被归一，但仍建议优先用非 reasoning 模型
 
 **端到端验证**：
@@ -250,18 +250,39 @@ curl -s -X POST http://YOUR_SUB2API_HOST:8080/v1/chat/completions \
 | `MAX_TOKENS_CAP` | var | `512` | `max_tokens` 上限，保护免费额度 |
 | `MAX_TOKENS_DEFAULT` | var | `256` | 客户端未传 `max_tokens` 时的默认值 |
 
-## 换模型
+## 可用模型
 
-编辑 `src/worker.js` 顶部的 `MODEL_MAP`：
+`/v1/models` 返回下列 **12 个别名**（sub2api 拉取模型列表时会自动出现）。全部已用真实账户实测（2026-11-09，Workers Free 计划，HTTP 200）：
+
+| 别名 | → Workers AI 模型 | 特点 |
+| --- | --- | --- |
+| `gpt-4o-mini` / `llama-3.3-70b` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 通用、非 reasoning，默认推荐 |
+| `gpt-4o` / `gemma-4-26b` | `@cf/google/gemma-4-26b-a4b-it` | 通用，输出稳定 |
+| `llama-4-scout` | `@cf/meta/llama-4-scout-17b-16e-instruct` | 轻量通用，便宜 |
+| `mistral-small-3.1` | `@cf/mistralai/mistral-small-3.1-24b-instruct` | 通用，非 reasoning |
+| `nemotron-3-120b` | `@cf/nvidia/nemotron-3-120b-a12b` | 大模型，质量高、单价也高 |
+| `glm-4.7-flash` | `@cf/zai-org/glm-4.7-flash` | 推理型，输出已归一到 `content` |
+| `gpt-oss-120b` / `gpt-oss-20b` | `@cf/openai/gpt-oss-*` | OpenAI 开源推理模型 |
+| `qwen3-30b` | `@cf/qwen/qwen3-30b-a3b-fp8` | 推理型，中文较好 |
+| `granite-4-micro` | `@cf/ibm-granite/granite-4.0-h-micro` | 极小极便宜（实测 0.07 Neurons） |
+
+**不含**：`@cf/moonshotai/kimi-k2.7-code`、`@cf/zai-org/glm-5.2`（实测 403 / error 5035，需 Workers Paid）；升级 Paid 后可自行加入。
+
+**直接用原始模型名**：除别名外，也可在请求里传任意 `@cf/...` 模型名（如 `@cf/openai/gpt-oss-20b`），Worker 会原样转发 —— 只是这些名字不会出现在 `/v1/models` 列表里。
+
+## 增删模型
+
+编辑 `src/worker.js` 顶部的 `MODEL_MAP`，加一行即可，`/v1/models` 与 sub2api 的模型列表自动同步：
 
 ```js
 const MODEL_MAP = Object.freeze({
   "gpt-4o-mini": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "gpt-4o": "@cf/google/gemma-4-26b-a4b-it",
+  "my-model": "@cf/xxx/yyy",   // ← 新增
+  // ...
 });
 ```
 
-改完 `npm test`，push 后 Workers Builds 自动部署（或手动 `npm run deploy`）。注意 Free 计划不可用 `@cf/moonshotai/kimi-k2.7-code`、`@cf/zai-org/glm-5.2`（返回 403 / error 5035），完整清单见 [Workers AI 模型目录](https://developers.cloudflare.com/workers-ai/models/)。
+改完 `npm test`，push 后 Workers Builds 自动部署（或手动 `npm run deploy`）。完整清单见 [Workers AI 模型目录](https://developers.cloudflare.com/workers-ai/models/)。
 
 ---
 
@@ -272,6 +293,10 @@ const MODEL_MAP = Object.freeze({
 | 一键部署按钮打不开 / 提示仓库不可用 | 仓库是 private，或 URL 不是 `github.com` | 把仓库设为 **Public** |
 | 引导页没有 secret 输入框 | `.dev.vars.example` 没被提交（曾被 `.gitignore` 误伤） | 确认文件在仓库根目录且已 commit |
 | 部署成功但请求返回 `500 gateway not configured` | secret 没配好 | dashboard → Worker → Settings → Variables and Secrets，或用 `wrangler secret put` 补齐 3 个值 |
+| 报错 `Could not route to /client/v4/accounts/replace-with-your-cloudflare-account-id/...` 或 `error 7003` | **`CF_ACCOUNT_ID` 仍是 `.dev.vars.example` 的占位值**，一键部署时没替换 | dashboard → Worker → Settings → Variables and Secrets 把 3 个 secret 都改成真实值；**改完需重新部署一次**。新版本会直接返回 `upstream credentials are still placeholder values` 并列出未填的字段 |
+| `/v1/models` 只有 2 个模型 | 旧版本硬编码了 2 个别名 | 更新到最新版本（12 个），重新部署后在 sub2api 重新拉取模型列表 |
+| push 到 `CF_AOG` 后线上没变化 | 一键部署克隆了**副本仓库**，Workers Builds 连的是副本 | push 到克隆出来的副本仓库；或本地 `npm run deploy`；或在 dashboard 的 Settings → Builds 里改连接的仓库 |
+| 改了 secret 但没生效 | 改 secret 不会触发构建 | 手动 Redeploy 一次，或往 production 分支 push 一个 commit |
 | 请求返回 401 | `GATEWAY_KEY` 与 sub2api 里填的不一致 | 两边对齐；注意不要带多余空格 |
 | 返回 `403 / error 5035` | 用了仅 Workers Paid 的模型 | 换 Free 可用模型，或升级 Paid |
 | 超出免费额度、请求失败 | Free 每天 10,000 Neurons，00:00 UTC 重置 | 等重置，或升级 Workers Paid |
@@ -297,7 +322,7 @@ const MODEL_MAP = Object.freeze({
 
 | 检查 | 结果 |
 | --- | --- |
-| `npm test`（离线，mock 上游） | **25/25 通过** |
+| `npm test`（离线，mock 上游） | **26/26 通过** |
 | `/health`、`/v1/models` | 200 |
 | 无鉴权 / 错误 key | 401 |
 | `/v1/responses`、未知模型 | 404 / 400 |
@@ -319,7 +344,7 @@ CF_AOG/
 ├── .dev.vars.example        # 一键部署读取的 secrets 声明（占位值，必须提交）
 ├── .gitignore               # 忽略 .dev.vars / .wrangler / node_modules
 ├── scripts/smoke.sh         # 本地/线上冒烟脚本
-├── tests/gateway.test.mjs   # 25 个离线单元测试
+├── tests/gateway.test.mjs   # 26 个离线单元测试
 └── README.md
 ```
 
