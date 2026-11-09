@@ -133,20 +133,22 @@
 
 ### 4.5 配置与一键部署兼容
 
-`wrangler.toml` 新增两个**可选**绑定：
+`wrangler.toml` 里保留两段**默认注释掉**的配置（需要时手动启用）：
 
 ```toml
-[[analytics_engine_datasets]]
-binding = "AOG_METRICS"
-dataset = "cf_aog_metrics"
+# [[analytics_engine_datasets]]
+# binding = "AOG_METRICS"
+# dataset = "cf_aog_metrics"
 
-[analytics]
-binding = "ANALYTICS_SQL"
+# [analytics]
+# binding = "ANALYTICS_SQL"
 ```
 
-- Analytics Engine 数据集只需 `binding` + `dataset`，**不需要预创建资源 ID**；表在首次写入时自动创建，一键部署无额外供给步骤。
-- 老部署（无这些 binding）：代码检测 `env.AOG_METRICS` / `env.ANALYTICS_SQL` 是否存在，不存在就跳过写入 / 显示「未启用」，网关功能完全不变。
-- `.dev.vars.example` **不新增任何 secret**，一键部署仍只填原来的 3 个值。
+> **实测教训（2026-11-09）**：Analytics Engine 需要在账户级**先手动启用**。若未启用就声明 `analytics_engine_datasets` binding，`wrangler deploy` 会直接失败并返回 `You need to enable Analytics Engine.`，**整个部署中断**（连推理都上不了线）。因此默认配置不声明 binding，改为文档化的三步启用流程。这是设计稿里标 `[INFERENCE]` 却没能提前验证的点，现已修正。
+
+- Analytics Engine 数据集只需 `binding` + `dataset`，**不需要预创建资源 ID**；表在首次写入时自动创建。
+- 未启用时：代码检测 `env.AOG_METRICS` / `env.ANALYTICS_SQL` 不存在，自动跳过写入 / 显示「未启用」，网关功能完全不变。
+- `.dev.vars.example` **不新增 secret**，一键部署仍只填原来的 3 个值。
 - 可选开关 `METRICS_ENABLED = "false"` 可一键关闭写入。
 
 ### 4.6 新增文件规划

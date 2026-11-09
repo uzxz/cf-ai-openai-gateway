@@ -17,17 +17,31 @@ MAX_TOKENS_DEFAULT = "256"
 # 设为 "false" 可关闭用量埋点（工作台查询仍可用）
 METRICS_ENABLED = "true"
 
-# ---- 监控统计（可选）----
-# 这两个 binding 都可选：不配置时网关推理功能完全不变，/dashboard 显示「监控未启用」。
-# 数据集只需 binding + dataset，不需要预创建资源 ID；表在首次写入时自动创建。
-# 官方目前明确「暂不计费」；保持 Workers Free 计划即不会产生账单。
-[[analytics_engine_datasets]]
-binding = "AOG_METRICS"
-dataset = "cf_aog_metrics"
+# ---------------------------------------------------------------------------
+# 监控统计（默认关闭，需要时手动启用）
+#
+# 为什么默认注释掉：Analytics Engine 需要在账户里**先手动启用**，
+# 否则部署带该 binding 的 Worker 会直接失败：
+#   "You need to enable Analytics Engine."
+# 为保证首次部署 / 一键部署 / 自动构建 100% 成功，这里默认不声明 binding。
+# 不声明时网关推理功能完全正常，仅 /dashboard 显示「监控未启用」。
+#
+# 启用步骤（三步）：
+#   1. 打开 https://dash.cloudflare.com/<你的账户 ID>/workers/analytics-engine
+#      点击启用（Free 计划含 100,000 写入/天 + 10,000 查询/天，当前不计费）
+#   2. 取消下面两段配置的注释
+#   3. 重新部署（push 后 Workers Builds 会自动部署，或 npm run deploy）
+#
+# 数据集不需要预创建资源 ID；表在首次写入时自动创建。
+# 保持 Workers Free 计划不升级，即不会产生账单。
+# ---------------------------------------------------------------------------
 
-# Analytics SQL binding（Wrangler >= 4.145）：Worker 内免 token 查询，无需新增 secret。
-[analytics]
-binding = "ANALYTICS_SQL"
+# [[analytics_engine_datasets]]
+# binding = "AOG_METRICS"
+# dataset = "cf_aog_metrics"
+
+# [analytics]
+# binding = "ANALYTICS_SQL"
 
 [observability]
 enabled = true

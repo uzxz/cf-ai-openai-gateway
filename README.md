@@ -389,7 +389,14 @@ const MODEL_MAP = Object.freeze({
 
 **显示内容**：所选范围的 Neurons 消耗、请求数、成功率、Input/Output tokens、平均延迟、按天用量趋势、模型分布（调用数 / Neurons / 占比）、错误分布；「今天」范围额外显示 10,000 Neurons/天 的额度进度条。
 
-**启用方式**：`wrangler.toml` 里已经配置好两个**可选** binding，重新部署后自动生效：
+**启用方式**（**默认关闭**，因为 Analytics Engine 需要账户级手动启用，否则部署会直接失败）：
+
+> ⚠️ 若在未启用时声明 binding，`wrangler deploy` 会报 `You need to enable Analytics Engine.`，**整个部署失败**（连推理都上不了线）。因此仓库里的 `wrangler.toml` 默认把这两段**注释掉**，保证首次部署 / 一键部署 / 自动构建 100% 成功。
+
+三步启用：
+
+1. 打开 `https://dash.cloudflare.com/<你的账户 ID>/workers/analytics-engine`，点击启用（Free 计划含 100,000 写入/天 + 10,000 查询/天，当前不计费）；
+2. 取消 `wrangler.toml` 里这两段注释：
 
 ```toml
 [[analytics_engine_datasets]]
@@ -400,9 +407,11 @@ dataset = "cf_aog_metrics"
 binding = "ANALYTICS_SQL"
 ```
 
+3. 重新部署（push 后 Workers Builds 自动部署，或 `npm run deploy`）。
+
 - Analytics Engine 数据集**不需要预创建**，表在首次写入时自动生成；`ANALYTICS_SQL` 是 Wrangler ≥ 4.145 的免 token 查询 binding。
 - `.dev.vars.example` **不新增任何 secret**，一键部署仍只填原来的 3 个值。
-- 已部署过的旧实例：在 dashboard → Worker → **Settings → Bindings** 补上这两个 binding（或重新部署一次），否则看板显示「监控未启用」，但**网关推理功能完全不受影响**。
+- 不启用监控时：网关推理、`/v1/models`、`/health` 全部正常，只有 `/dashboard` 显示「监控未启用」。
 - 设 `METRICS_ENABLED = "false"` 可一键关闭写入。
 
 **为什么不会产生额外费用**：
@@ -440,7 +449,8 @@ binding = "ANALYTICS_SQL"
 | 超出免费额度、请求失败 | Free 每天 10,000 Neurons，00:00 UTC 重置 | 等重置，或升级 Workers Paid |
 | sub2api 报 404 / 空回复 | 上游被当成 Responses 转发 | 设 `openai_responses_mode: force_chat_completions`，且客户端只走 `/v1/chat/completions` |
 | `content` 为空 | reasoning 模型输出在 `reasoning_content` | 本 Worker 已自动归一；若仍为空改用非 reasoning 模型 |
-| `/dashboard` 显示「监控未启用」 | 旧实例没有 `AOG_METRICS` / `ANALYTICS_SQL` binding | dashboard → Worker → Settings → Bindings 补上，或重新部署；推理功能不受影响 |
+| `/dashboard` 显示「监控未启用」 | 监控 binding 默认关闭（`wrangler.toml` 里被注释） | 先启用 Analytics Engine，再取消 `wrangler.toml` 里两段注释并重新部署 |
+| 部署报 `You need to enable Analytics Engine` | 账户未启用该服务，但配置里声明了 binding | 打开 <https://dash.cloudflare.com/> → Workers → Analytics Engine 启用；或先把 `wrangler.toml` 里那两段注释掉即可恢复部署 |
 | 看板显示「部分统计不可用」 | 本地 dev 下 Analytics SQL 无本地实现，或某条查询失败 | 用线上地址访问；查询失败只影响该视图，其他数据照常显示 |
 | 本地 `wrangler dev` 报 unknown argument | wrangler 4 没有 `--local-strict` | 用 `npm run dev` 或 `npx wrangler dev --local` |
 
